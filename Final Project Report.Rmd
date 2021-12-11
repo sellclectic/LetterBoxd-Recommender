@@ -1,0 +1,254 @@
+---
+title: "Final Project"
+author: "Group 1 Jared Bryson, Harry Duan, Yichuan Hong, Huan Wang, Haodong Xuan"
+date: "12/8/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+set.seed(917)
+knitr::opts_chunk$set(echo = TRUE, comment="", warning = FALSE, message = FALSE, tidy.opts=list(width.cutoff=55))
+```
+
+```{r libraries, echo = FALSE}
+library(recommenderlab)
+library(ggplot2)
+library(data.table)
+library(reshape2)
+library(dplyr) 
+library(tidyverse)
+library(lubridate)
+library(pander)
+```
+
+```{r source_files}
+
+```
+
+```{r functions}
+yearsubstr <- function(x){
+  substr(x, nchar(x)-5, nchar(x))
+}
+```
+
+```{r constants}
+
+```
+
+## Exploratory Data Analysis
+
+```{r load_data}
+movies = read.csv('~/Desktop/CU Class/5902/Final Project/Code/ml-latest-small/movies.csv', header = TRUE)
+ratings= read.csv('~/Desktop/CU Class/5902/Final Project/Code/ml-latest-small/ratings.csv', header = TRUE)
+movies_num = length(movies$movieId)
+ratings_num = length(ratings$timestamp)
+head(movies,10)
+head(ratings,10)
+```
+
+
+### Movies
+
+#### Extract Genres
+
+```{r genres}
+genres_list = data.frame(do.call("rbind", strsplit(as.character(movies$genres), "|", fixed = TRUE)))
+genres_list = unique(as.vector(as.matrix(genres_list))) # (no genres listed) and IMAX are not genres
+genres_list = genres_list[1:18]
+
+genres_matrix = matrix(0, movies_num, length(genres_list))
+colnames(genres_matrix) = genres_list
+
+
+ncols <- max(stringr::str_count(movies$genres, "[|]")) + 1
+colnm <- paste("col", 1:ncols)
+genres_temp <- tidyr::separate(data = movies, col = genres, sep = "[|]", into = colnm, remove = FALSE)[4:13]
+
+
+
+for (i in 1:nrow(genres_temp)) {
+  for (j in 1:ncol(genres_temp)) {
+    col = which(matrix(colnames(genres_matrix)) == genres_temp[i,j])
+    genres_matrix[i,col] <- 1
+  }
+}
+
+genres_df = as.data.frame(genres_matrix, stringsAsFactors=FALSE)
+genres_df = sapply(genres_df, as.integer)
+
+head(genres_df)
+```
+
+#### Extract Year
+
+```{r title&year}
+movies$years = substr(lapply(movies$title, yearsubstr),2,5)
+movies$title = substr(movies$title,1,nchar(movies$title)-6)
+head(movies)
+```
+
+#### New Movies data
+
+```{r movie_new}
+movies_new = cbind(movies[,-3],genres_df)
+head(movies_new)
+```
+### Ratings
+
+```{r}
+ratings_matrix <- dcast(ratings, userId~movieId, value.var = "rating", na.rm=FALSE)
+ratings_matrix <- as.matrix(ratings_matrix[,-1])
+ratings_matrix <- as(ratings_matrix, "realRatingMatrix")
+ratings_matrix_norm <- normalize(ratings_matrix)
+
+```
+
+
+```{r}
+head(ratings_matrix@data[ ,1:9])
+```
+
+
+
+## Data Modeling
+
+```{r split_data}
+split = sample(nrow(ratings_matrix), size = 0.8 * nrow(ratings_matrix))
+train = ratings_matrix[split,]
+test = ratings_matrix[-split,]
+
+```
+
+### Item-based Collaborative Filtering
+
+```{r}
+method = 'IBCF'
+parameter = list(method='Jaccard')
+n_training = 1000
+recom_ibcf = Recommender(ratings_matrix_norm, method=method, parameter=parameter)
+# predict
+ibcf_top5 = predict(recom_ibcf, newdata=test, type='topNList', n=5)
+# check recommendations
+getList(ibcf_top5)[1:5]
+```
+
+```{r}
+n_fold <- 4
+items_to_keep <- 10
+rating_threshold <- 3
+eval_sets <- evaluationScheme(data = ratings_matrix_norm,
+                              method = "cross-validation",
+                              k = n_fold,
+                              given = items_to_keep,
+                              goodRating = rating_threshold)
+
+```
+
+
+```{r}
+eval_recommender <- Recommender(data = getData(eval_sets, "train"),
+                               method=method, parameter=parameter)
+```
+
+
+```{r}
+eval_prediction <- predict(object = eval_recommender,
+                           newdata = getData(eval_sets, "known"),
+                           n = 10,
+                           type = "ratings")
+```
+
+
+```{r}
+eval_accuracy <- calcPredictionAccuracy(
+  x = eval_prediction,
+  data = getData(eval_sets, "unknown"),
+  byUser = TRUE)
+```
+
+```{r}
+eval_accuracy <- calcPredictionAccuracy(
+  x = eval_prediction,
+  data = getData(eval_sets, "unknown"),
+  byUser = FALSE)
+eval_accuracy
+
+```
+
+
+```{r}
+results <- evaluate(x = eval_sets,
+                    method = method, parameter=parameter,
+                    n = seq(10, 100, 10))
+```
+
+
+```{r}
+columns_to_sum <- c("TP", "FP", "FN", "TN")
+indices_summed <- Reduce("+", getConfusionMatrix(results))[, columns_to_sum]
+pander(head(indices_summed))
+
+```
+
+```{r}
+plot(results,
+     annotate = TRUE,
+     main = "ROC curve")
+```
+
+
+
+
+
+### User-based Collaborative Filtering
+```{r}
+method = 'UBCF'
+parameter = list(method='cosine')
+recom_ubcf = Recommender(ratings_matrix_norm, method=method, parameter=parameter)
+# predict
+ubcf_top5 = predict(recom_ubcf, newdata=test, method='topNList', n=5)
+# check recommendations
+getList(ubcf_top5)[1:5]
+```
+
+### Hybrid Method
+```{r}
+hybrid_recom <- HybridRecommender(Recommender(ratings_matrix_norm, method = "POPULAR"), 
+                                  Recommender(ratings_matrix_norm, method = "IBCF"), 
+                                  Recommender(ratings_matrix_norm, method = "UBCF"), 
+                                  weights = c(.2, .4, .4))
+
+# predict
+hybrid_top5 = predict(hybrid_recom, newdata=test, method='topNList', n=5)
+# check recommendations
+getList(hybrid_top5)[1:5]
+```
+
+## Evaluation 
+
+```{r}
+scheme <- ratings_matrix_norm %>% 
+  evaluationScheme(method = "split",
+                   train  = 0.9,  # 90% data train
+                   given  = -1,
+                   goodRating = 0
+                   )
+
+result_rating <- evaluate(scheme, 
+                          method = "UBCF",
+                          parameter = list(method='cosine', k = 5),
+                          type  = "ratings"
+                          )
+```
+
+```{r}
+result_rating@results %>% 
+  map(function(x) x@cm) %>% 
+  unlist() %>% 
+  matrix(ncol = 3, byrow = T) %>% 
+  as.data.frame() %>% 
+  summarise_all(mean) %>% 
+  setNames(c("RMSE", "MSE", "MAE"))
+```
+
+
